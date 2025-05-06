@@ -19,14 +19,28 @@ def main():
     args = parser.parse_args()
 
     print('loading and building expert policy')
-    lin_policy = np.load(args.expert_policy_file)
-    lin_policy = lin_policy.items()[0][1]
+    policy_data = np.load(args.expert_policy_file, allow_pickle=True)
     
-    M = lin_policy[0]
-    # mean and std of state vectors estimated online by ARS. 
-    mean = lin_policy[1]
-    std = lin_policy[2]
-        
+    # 检查新格式还是旧格式
+    if 'weights' in policy_data:
+        # 新格式 - 使用字典
+        M = policy_data['weights']
+        mean = policy_data['mu']
+        std = policy_data['std']
+    else:
+        # 旧格式 - 使用数组
+        try:
+            lin_policy = policy_data.items()[0][1]
+            M = lin_policy[0]
+            mean = lin_policy[1]
+            std = lin_policy[2]
+        except:
+            # 处理更旧的格式
+            lin_policy = next(iter(policy_data.items()))[1]
+            M = lin_policy[0]
+            mean = lin_policy[1]
+            std = lin_policy[2]
+    
     env = gym.make(args.envname)
 
     returns = []

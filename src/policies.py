@@ -7,7 +7,7 @@ Benjamin Recht
 
 
 import numpy as np
-from filter import get_filter
+from src.filter import get_filter
 
 class Policy(object):
 
@@ -53,6 +53,5 @@ class LinearPolicy(Policy):
     def get_weights_plus_stats(self):
         
         mu, std = self.observation_filter.get_stats()
-        aux = np.asarray([self.weights, mu, std])
-        return aux
+        return {"weights": self.weights, "mu": mu, "std": std}
         

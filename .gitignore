@@ -1,0 +1,6 @@
+**/__pycache__/**
+logs/
+results/
+trained_policies/
+data/
+models/

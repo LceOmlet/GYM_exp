@@ -5,18 +5,20 @@ Aurelia Guy
 Benjamin Recht 
 '''
 
-import parser
+# import parser
 import time
 import os
 import numpy as np
 import gym
-import logz
+import src.logz as logz
 import ray
-import utils
-import optimizers
-from policies import *
+import src.utils as utils
+from src.utils import RewardProcessor
+# import optimizers
+from src.optimizers import *
+from src.policies import *
 import socket
-from shared_noise import *
+from src.shared_noise import *
 
 @ray.remote
 class Worker(object):
@@ -31,9 +33,30 @@ class Worker(object):
                  rollout_length=1000,
                  delta_std=0.02):
 
+        # 确保在worker中设置环境变量
+        os.environ["MUJOCO_PY_MUJOCO_PATH"] = "/home/liangchen/.mujoco/mujoco210/"
+        if "LD_LIBRARY_PATH" not in os.environ:
+            os.environ["LD_LIBRARY_PATH"] = ""
+        if "/home/liangchen/.mujoco/mujoco210/bin" not in os.environ["LD_LIBRARY_PATH"]:
+            os.environ["LD_LIBRARY_PATH"] += ":/home/liangchen/.mujoco/mujoco210/bin"
+        if "/usr/lib/nvidia" not in os.environ["LD_LIBRARY_PATH"]:
+            os.environ["LD_LIBRARY_PATH"] += ":/usr/lib/nvidia"
+
         # initialize OpenAI environment for each worker
-        self.env = gym.make(env_name)
-        self.env.seed(env_seed)
+        try:
+            # 新版Gym API: 在创建环境时设置随机种子
+            self.env = gym.make(env_name, render_mode=None)
+            
+            # 新版Gym中不使用seed方法，而是用np.random设置环境的随机数生成器
+            self.env.reset(seed=env_seed)
+            self.env.action_space.seed(env_seed)
+        except TypeError:
+            # 兼容旧版API
+            self.env = gym.make(env_name)
+            try:
+                self.env.seed(env_seed)
+            except AttributeError:
+                print(f"警告: 环境 {env_name} 不支持 seed 方法")
 
         # each worker gets access to the shared noise table
         # with independent random streams for sampling
@@ -47,6 +70,11 @@ class Worker(object):
             
         self.delta_std = delta_std
         self.rollout_length = rollout_length
+        
+        # 为当前环境确定合适的shift值
+        self.env_name = env_name
+        self.shift = RewardProcessor.get_shift_for_env(env_name)
+        print(f"Worker 使用环境 {env_name}, shift值: {self.shift}")
 
         
     def get_weights_plus_stats(self):
@@ -57,7 +85,7 @@ class Worker(object):
         return self.policy.get_weights_plus_stats()
     
 
-    def rollout(self, shift = 0., rollout_length = None):
+    def rollout(self, shift = None, rollout_length = None):
         """ 
         Performs one rollout of maximum length rollout_length. 
         At each time-step it substracts shift from the reward.
@@ -65,22 +93,60 @@ class Worker(object):
         
         if rollout_length is None:
             rollout_length = self.rollout_length
+            
+        # 如果没有指定shift，使用环境预设的shift值
+        if shift is None:
+            shift = self.shift
 
         total_reward = 0.
         steps = 0
 
-        ob = self.env.reset()
-        for i in range(rollout_length):
-            action = self.policy.act(ob)
-            ob, reward, done, _ = self.env.step(action)
-            steps += 1
-            total_reward += (reward - shift)
-            if done:
-                break
+        try:
+            # 新版Gym API
+            ob, _ = self.env.reset()
+            for i in range(rollout_length):
+                action = self.policy.act(ob)
+                
+                # 直接使用try-except捕获不同版本API的差异
+                try:
+                    ob, reward, terminated, truncated, info = self.env.step(action)
+                    done = bool(terminated) or bool(truncated)  # 显式转换为Python bool
+                except ValueError:
+                    # 旧版API
+                    ob, reward, done, _ = self.env.step(action)
+                    done = bool(done)  # 显式转换为Python bool
+                
+                steps += 1
+                # 使用RewardProcessor处理奖励，指定ARS算法
+                processed_reward = RewardProcessor.process_reward(
+                    reward, 
+                    shift=shift,
+                    algorithm_type="ARS"
+                )
+                total_reward += float(processed_reward)  # 显式转换为float
+                if done:
+                    break
+        except (ValueError, TypeError):
+            # 旧版Gym API
+            ob = self.env.reset()
+            for i in range(rollout_length):
+                action = self.policy.act(ob)
+                ob, reward, done, _ = self.env.step(action)
+                done = bool(done)  # 显式转换为Python bool
+                steps += 1
+                # 使用RewardProcessor处理奖励，指定ARS算法
+                processed_reward = RewardProcessor.process_reward(
+                    reward, 
+                    shift=shift,
+                    algorithm_type="ARS"
+                )
+                total_reward += float(processed_reward)  # 显式转换为float
+                if done:
+                    break
             
         return total_reward, steps
 
-    def do_rollouts(self, w_policy, num_rollouts = 1, shift = 1, evaluate = False):
+    def do_rollouts(self, w_policy, num_rollouts = 1, shift = None, evaluate = False):
         """ 
         Generate multiple rollouts with a policy parametrized by w_policy.
         """
@@ -99,7 +165,15 @@ class Worker(object):
 
                 # for evaluation we do not shift the rewards (shift = 0) and we use the
                 # default rollout length (1000 for the MuJoCo locomotion tasks)
-                reward, r_steps = self.rollout(shift = 0., rollout_length = self.env.spec.timestep_limit)
+                try:
+                    # 新版Gym API
+                    max_episode_steps = self.env.spec.max_episode_steps
+                except AttributeError:
+                    # 旧版Gym API
+                    max_episode_steps = self.env.spec.timestep_limit
+                
+                # 评估时shift=0
+                reward, r_steps = self.rollout(shift = 0., rollout_length = max_episode_steps)
                 rollout_rewards.append(reward)
                 
             else:
@@ -113,10 +187,12 @@ class Worker(object):
 
                 # compute reward and number of timesteps used for positive perturbation rollout
                 self.policy.update_weights(w_policy + delta)
+                # 使用预先确定的shift值
                 pos_reward, pos_steps  = self.rollout(shift = shift)
 
                 # compute reward and number of timesteps used for negative pertubation rollout
                 self.policy.update_weights(w_policy - delta)
+                # 使用预先确定的shift值
                 neg_reward, neg_steps = self.rollout(shift = shift) 
                 steps += pos_steps + neg_steps
 
@@ -155,6 +231,7 @@ class ARSLearner(object):
                  step_size=0.01,
                  shift='constant zero',
                  params=None,
+                 optimizer_type='sgd',
                  seed=123):
 
         logz.configure_output_dir(logdir)
@@ -171,11 +248,20 @@ class ARSLearner(object):
         self.step_size = step_size
         self.delta_std = delta_std
         self.logdir = logdir
-        self.shift = shift
         self.params = params
         self.max_past_avg_reward = float('-inf')
         self.num_episodes_used = float('inf')
-
+        self.optimizer_type = optimizer_type
+        
+        # 确定当前环境的shift值
+        if shift == 'constant zero':
+            # 自动根据环境确定shift值
+            self.shift = RewardProcessor.get_shift_for_env(env_name)
+            print(f"从RewardProcessor获取环境 {env_name} 的ARS算法shift值: {self.shift}")
+        else:
+            # 使用传入的shift值
+            self.shift = shift
+            print(f"使用指定的ARS算法shift值: {self.shift}")
         
         # create shared table for storing noise
         print("Creating deltas table.")
@@ -202,7 +288,20 @@ class ARSLearner(object):
             raise NotImplementedError
             
         # initialize optimization algorithm
-        self.optimizer = optimizers.SGD(self.w_policy, self.step_size)        
+        if optimizer_type == 'sgd':
+            self.optimizer = optimizers.SGD(self.w_policy, self.step_size)
+        elif optimizer_type == 'adam':
+            self.optimizer = optimizers.AdamOptimizer(self.w_policy, self.step_size)
+        elif optimizer_type == 'zero_order':
+            self.optimizer = optimizers.ZeroOrderOptimizer(self.w_policy, self.step_size, 
+                                                          noise_std=self.delta_std)
+        elif optimizer_type == 'multi_scale':
+            self.optimizer = optimizers.MultiScaleZeroOrderOptimizer(self.w_policy, self.step_size,
+                                                                    noise_std=self.delta_std)
+        else:
+            print(f"Unknown optimizer: {optimizer_type}, using SGD")
+            self.optimizer = optimizers.SGD(self.w_policy, self.step_size)
+        
         print("Initialization of ARS complete.")
 
     def aggregate_rollouts(self, num_rollouts = None, evaluate = False):
@@ -292,7 +391,17 @@ class ARSLearner(object):
         
         g_hat = self.aggregate_rollouts()                    
         print("Euclidean norm of update step:", np.linalg.norm(g_hat))
-        self.w_policy -= self.optimizer._compute_step(g_hat).reshape(self.w_policy.shape)
+        
+        # Update policy weights with optimizer
+        if self.optimizer_type == 'sgd':
+            # Original SGD implementation for backward compatibility
+            self.w_policy -= self.optimizer._compute_step(g_hat).reshape(self.w_policy.shape)
+        else:
+            # For other optimizers, reshape g_hat to match w_policy's shape
+            g_hat_shaped = g_hat.reshape(self.w_policy.shape)
+            step = self.optimizer._compute_step(g_hat_shaped)
+            self.w_policy -= step
+            
         return
 
     def train(self, num_iter):
@@ -310,8 +419,9 @@ class ARSLearner(object):
             if ((i + 1) % 10 == 0):
                 
                 rewards = self.aggregate_rollouts(num_rollouts = 100, evaluate = True)
-                w = ray.get(self.workers[0].get_weights_plus_stats.remote())
-                np.savez(self.logdir + "/lin_policy_plus", w)
+                policy_stats = ray.get(self.workers[0].get_weights_plus_stats.remote())
+                # 直接保存字典格式的权重和统计信息
+                np.savez(self.logdir + "/lin_policy_plus", **policy_stats)
                 
                 print(sorted(self.params.items()))
                 logz.log_tabular("Time", time.time() - start)
@@ -365,6 +475,13 @@ def run_ars(params):
                    'ob_dim':ob_dim,
                    'ac_dim':ac_dim}
 
+    # 如果用户提供了具体的shift值，使用该值
+    # 否则使用RewardProcessor自动确定合适的shift值
+    shift_value = params['shift']
+    if shift_value != 'constant zero' and shift_value != 0 and shift_value != 1 and shift_value != 5:
+        print(f"警告: 传入了非标准shift值: {shift_value}, 将自动使用环境推荐值")
+        shift_value = 'constant zero'
+        
     ARS = ARSLearner(env_name=params['env_name'],
                      policy_params=policy_params,
                      num_workers=params['n_workers'], 
@@ -374,8 +491,9 @@ def run_ars(params):
                      delta_std=params['delta_std'], 
                      logdir=logdir,
                      rollout_length=params['rollout_length'],
-                     shift=params['shift'],
+                     shift=shift_value,
                      params=params,
+                     optimizer_type=params['optimizer_type'],
                      seed = params['seed'])
         
     ARS.train(params['n_iter'])
@@ -386,7 +504,7 @@ def run_ars(params):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env_name', type=str, default='HalfCheetah-v1')
+    parser.add_argument('--env_name', type=str, default='HalfCheetah-v4')
     parser.add_argument('--n_iter', '-n', type=int, default=1000)
     parser.add_argument('--n_directions', '-nd', type=int, default=8)
     parser.add_argument('--deltas_used', '-du', type=int, default=8)
@@ -405,9 +523,23 @@ if __name__ == '__main__':
 
     # for ARS V1 use filter = 'NoFilter'
     parser.add_argument('--filter', type=str, default='MeanStdFilter')
+    
+    # Optimizer type: sgd, adam, zero_order, or multi_scale
+    parser.add_argument('--optimizer_type', type=str, default='sgd',
+                       choices=['sgd', 'adam', 'zero_order', 'multi_scale'],
+                       help='Optimization algorithm to use: sgd, adam, zero_order, or multi_scale')
 
     local_ip = socket.gethostbyname(socket.gethostname())
-    ray.init(redis_address= local_ip + ':6379')
+    
+    # 设置环境变量并创建runtime_env配置以传递给所有worker
+    runtime_env = {
+        "env_vars": {
+            "MUJOCO_PY_MUJOCO_PATH": "/home/liangchen/.mujoco/mujoco210/",
+            "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", "") + ":/home/liangchen/.mujoco/mujoco210/bin:/usr/lib/nvidia"
+        }
+    }
+    
+    ray.init(address=f"{local_ip}:6379", runtime_env=runtime_env)
     
     args = parser.parse_args()
     params = vars(args)

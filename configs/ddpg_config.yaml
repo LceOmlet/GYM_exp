@@ -1,0 +1,30 @@
+# DDPG配置参数
+env_name: HalfCheetah-v4
+timesteps: 500000
+seed: 42
+n_workers: 4
+parallel_collection: true
+
+# DDPG特定参数
+hidden_dim: 256
+actor_lr: 1.0e-4
+critic_lr: 1.0e-3
+buffer_size: 1000000
+batch_size: 100
+start_steps: 10000
+noise_scale: 0.1
+collection_interval: 1000
+
+# 运行配置
+log_interval: 10
+save_interval: 100
+eval_episodes: 10
+
+# MSZoo优化配置
+use_mszoo: true
+mszoo_config:
+  perturbation_radii: [0.01, 0.02, 0.05]
+  population_size: 10
+  weight_update_interval: 20
+  noise_std: 0.15
+  noise_decay: 0.995 

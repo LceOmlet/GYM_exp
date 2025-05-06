@@ -1,0 +1,41 @@
+# 实验3：使用更多扰动半径的MSZoo配置
+
+# 基本设置
+exp_name: "more_radii_exp"
+env_name: HalfCheetah-v4
+seed: 42
+timesteps: 500000
+algorithms:
+  - ms_ppo
+  - ms_ddpg
+  
+# 资源设置
+n_workers: 8
+parallel_collection: true
+
+# PPO超参数
+batch_size: 512
+ppo_epochs: 5
+target_kl: 0.01
+ent_coef: 0.01
+policy_update_interval: 2048
+normalize_states: true
+
+# DDPG超参数
+buffer_size: 1000000
+start_steps: 10000
+noise_scale: 0.1
+
+# MSZoo配置 - 使用更多扰动半径
+use_mszoo: true
+mszoo_config:
+  perturbation_radii: [0.001, 0.005, 0.01, 0.02, 0.05, 0.1]  # 更多的扰动半径
+  population_size: 8                                        # 每个半径较少的群体
+  weight_update_interval: 10                                # 更频繁的权重更新
+  noise_std: 0.15
+  noise_decay: 0.995
+
+# 运行配置
+log_interval: 10
+save_interval: 100
+eval_episodes: 10 

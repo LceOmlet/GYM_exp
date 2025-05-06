@@ -1,0 +1,55 @@
+# 实验配置参数模板 - 可以复制此文件并修改参数值来创建不同的实验配置
+
+# 基本设置
+exp_name: "实验名称"  # 实验名称，将用于创建日志目录
+env_name: HalfCheetah-v4
+seed: 42
+timesteps: 500000
+algorithms:  # 要运行的算法，可以是单个算法或多个算法
+  - ms_ppo
+  - ms_ddpg
+  
+# 资源设置
+n_workers: 8
+parallel_collection: true
+
+# 公共超参数
+hidden_dim: 1024  # 隐藏层维度
+actor_lr: 2.0e-4  # Actor学习率
+critic_lr: 1.0e-3  # Critic学习率
+
+# PPO超参数
+batch_size: 512   # PPO批次大小
+ppo_epochs: 5     # PPO更新轮数
+target_kl: 0.01   # PPO目标KL散度
+ent_coef: 0.01    # PPO熵系数
+policy_update_interval: 2048  # PPO策略更新间隔步数
+normalize_states: true  # 是否归一化状态
+
+# DDPG超参数
+buffer_size: 1000000  # DDPG经验回放缓冲区大小
+start_steps: 10000    # DDPG开始训练前的随机动作步数
+noise_scale: 0.1      # DDPG探索噪声比例
+
+# ARS超参数
+n_directions: 16      # ARS扰动方向数量
+deltas_used: 16       # ARS使用的最优方向数量
+step_size: 0.02       # ARS步长
+delta_std: 0.03       # ARS扰动标准差
+optimizer_type: multi_scale  # ARS优化器类型 (sgd, adam, zero_order, multi_scale)
+rollout_length: 1000  # ARS每次策略评估的最大步数
+
+# MSZoo配置
+use_mszoo: true  # 是否使用MSZoo优化器（对于PPO和DDPG）
+mszoo_config:
+  perturbation_radii: [0.01, 0.02, 0.05]  # 扰动半径列表
+  population_size: 10         # 每个扰动半径的群体大小
+  weight_update_interval: 20  # 权重更新间隔
+  noise_std: 0.15             # 初始噪声标准差
+  noise_decay: 0.995          # 噪声衰减率
+
+# 运行配置
+log_interval: 10     # 日志记录间隔
+save_interval: 100   # 模型保存间隔
+eval_episodes: 10    # 评估轮数
+render: false        # 是否渲染环境 
